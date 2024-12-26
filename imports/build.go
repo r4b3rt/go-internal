@@ -32,7 +32,6 @@ var slashslash = []byte("//")
 // the purpose of satisfying build tags, in order to estimate
 // (conservatively) whether a file could ever possibly be used
 // in any build.
-//
 func ShouldBuild(content []byte, tags map[string]bool) bool {
 	// Pass 1. Identify leading run of // comments and blank lines,
 	// which must be followed by a blank line.
@@ -96,7 +95,6 @@ func ShouldBuild(content []byte, tags map[string]bool) bool {
 //	tag (if tags[tag] is true)
 //	!tag (if tags[tag] is false)
 //	a comma-separated list of any of these
-//
 func matchTags(name string, tags map[string]bool) bool {
 	if name == "" {
 		return false
@@ -145,12 +143,12 @@ func matchTag(name string, tags map[string]bool, want bool) bool {
 // suffix which does not match the current system.
 // The recognized name formats are:
 //
-//     name_$(GOOS).*
-//     name_$(GOARCH).*
-//     name_$(GOOS)_$(GOARCH).*
-//     name_$(GOOS)_test.*
-//     name_$(GOARCH)_test.*
-//     name_$(GOOS)_$(GOARCH)_test.*
+//	name_$(GOOS).*
+//	name_$(GOARCH).*
+//	name_$(GOOS)_$(GOARCH).*
+//	name_$(GOOS)_test.*
+//	name_$(GOARCH)_test.*
+//	name_$(GOOS)_$(GOARCH)_test.*
 //
 // An exception: if GOOS=android, then files with GOOS=linux are also matched.
 //
@@ -195,17 +193,28 @@ func MatchFile(name string, tags map[string]bool) bool {
 	return true
 }
 
-var KnownOS = make(map[string]bool)
-var KnownArch = make(map[string]bool)
+var (
+	KnownOS   = make(map[string]bool)
+	UnixOS    = make(map[string]bool)
+	KnownArch = make(map[string]bool)
+)
 
 func init() {
 	for _, v := range strings.Fields(goosList) {
 		KnownOS[v] = true
+	}
+	for _, v := range strings.Fields(unixList) {
+		UnixOS[v] = true
 	}
 	for _, v := range strings.Fields(goarchList) {
 		KnownArch[v] = true
 	}
 }
 
-const goosList = "aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd openbsd plan9 solaris windows zos "
-const goarchList = "386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm "
+// These values come from Go's src/go/build/syslist.go and should be kept in
+// sync with that file.
+const (
+	goosList   = "aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd openbsd plan9 solaris windows zos "
+	unixList   = "aix android darwin dragonfly freebsd hurd illumos ios linux netbsd openbsd solaris "
+	goarchList = "386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm "
+)

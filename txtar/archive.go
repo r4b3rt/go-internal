@@ -6,15 +6,15 @@
 //
 // The goals for the format are:
 //
-//	- be trivial enough to create and edit by hand.
-//	- be able to store trees of text files describing go command test cases.
-//	- diff nicely in git history and code reviews.
+//   - be trivial enough to create and edit by hand.
+//   - be able to store trees of text files describing go command test cases.
+//   - diff nicely in git history and code reviews.
 //
 // Non-goals include being a completely general archive format,
 // storing binary data, storing file modes, storing special files like
 // symbolic links, and so on.
 //
-// Txtar format
+// # Txtar format
 //
 // A txtar archive is zero or more comment lines and then a sequence of file entries.
 // Each file entry begins with a file marker line of the form "-- FILENAME --"
@@ -35,42 +35,31 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/tools/txtar"
 )
 
 // An Archive is a collection of files.
-type Archive struct {
-	Comment []byte
-	Files   []File
-}
+type Archive = txtar.Archive
 
 // A File is a single file in an archive.
-type File struct {
-	Name string // name of file ("foo/bar.txt")
-	Data []byte // text content of file
-}
+type File = txtar.File
 
 // Format returns the serialized form of an Archive.
 // It is assumed that the Archive data structure is well-formed:
 // a.Comment and all a.File[i].Data contain no file marker lines,
 // and all a.File[i].Name is non-empty.
 func Format(a *Archive) []byte {
-	var buf bytes.Buffer
-	buf.Write(fixNL(a.Comment))
-	for _, f := range a.Files {
-		fmt.Fprintf(&buf, "-- %s --\n", f.Name)
-		buf.Write(fixNL(f.Data))
-	}
-	return buf.Bytes()
+	return txtar.Format(a)
 }
 
 // ParseFile parses the named file as an archive.
 func ParseFile(file string) (*Archive, error) {
-	data, err := ioutil.ReadFile(file)
+	data, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +68,9 @@ func ParseFile(file string) (*Archive, error) {
 
 // Parse parses the serialized form of an Archive.
 // The returned Archive holds slices of data.
+//
+// TODO use golang.org/x/tools/txtar.Parse when https://github.com/golang/go/issues/59264
+// is fixed.
 func Parse(data []byte) *Archive {
 	a := new(Archive)
 	var name string
@@ -206,11 +198,11 @@ func Write(a *Archive, dir string) error {
 		}
 		fp = filepath.Join(dir, fp)
 
-		if err := os.MkdirAll(filepath.Dir(fp), 0777); err != nil {
+		if err := os.MkdirAll(filepath.Dir(fp), 0o777); err != nil {
 			return err
 		}
 		// Avoid overwriting existing files by using O_EXCL.
-		out, err := os.OpenFile(fp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+		out, err := os.OpenFile(fp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
 		if err != nil {
 			return err
 		}

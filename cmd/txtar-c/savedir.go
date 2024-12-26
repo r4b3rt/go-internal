@@ -6,18 +6,16 @@
 //
 // Usage:
 //
-//	txtar-c /path/to/dir >saved.txt
+//	txtar-c /path/to/dir >saved.txtar
 //
-// See https://godoc.org/github.com/rogpeppe/go-internal/txtar for details of the format
+// See https://godoc.org/golang.org/x/tools/txtar for details of the format
 // and how to parse a txtar file.
-//
 package main
 
 import (
 	"bytes"
-	stdflag "flag"
+	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -27,11 +25,10 @@ import (
 	"github.com/rogpeppe/go-internal/txtar"
 )
 
-var flag = stdflag.NewFlagSet(os.Args[0], stdflag.ContinueOnError)
-
 func usage() {
-	fmt.Fprintf(os.Stderr, "usage: txtar-c dir >saved.txt\n")
+	fmt.Fprintf(os.Stderr, "usage: txtar-c dir >saved.txtar\n")
 	flag.PrintDefaults()
+	os.Exit(2)
 }
 
 var (
@@ -40,17 +37,10 @@ var (
 )
 
 func main() {
-	os.Exit(main1())
-}
-
-func main1() int {
 	flag.Usage = usage
-	if flag.Parse(os.Args[1:]) != nil {
-		return 2
-	}
+	flag.Parse()
 	if flag.NArg() != 1 {
 		usage()
-		return 2
 	}
 
 	log.SetPrefix("txtar-c: ")
@@ -60,7 +50,10 @@ func main1() int {
 
 	a := new(txtar.Archive)
 	dir = filepath.Clean(dir)
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
 		if path == dir {
 			return nil
 		}
@@ -74,9 +67,9 @@ func main1() int {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		data, err := ioutil.ReadFile(path)
+		data, err := os.ReadFile(path)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		if !utf8.Valid(data) {
 			log.Printf("%s: ignoring file with invalid UTF-8 data", path)
@@ -104,10 +97,10 @@ func main1() int {
 			Data: data,
 		})
 		return nil
-	})
+	}); err != nil {
+		log.Fatal(err)
+	}
 
 	data := txtar.Format(a)
 	os.Stdout.Write(data)
-
-	return 0
 }

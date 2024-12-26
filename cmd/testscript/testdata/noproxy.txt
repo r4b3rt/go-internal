@@ -6,5 +6,5 @@ testscript -v file.txt
 
 -- file.txt --
 >go env
->[!windows] stdout '^GOPROXY="0.1.2.3"$'
+>[!windows] stdout '^GOPROXY=''0.1.2.3''$'
 >[windows] stdout '^set GOPROXY=0.1.2.3$'

@@ -14,7 +14,7 @@ The testscript command runs github.com/rogpeppe/go-internal/testscript scripts
 in a fresh temporary work directory tree.
 
 Usage:
-    testscript [-v] [-e VAR[=value]]... [-u] [-work] files...
+    testscript [-v] [-e VAR[=value]]... [-u] [-continue] [-work] files...
 
 The testscript command is designed to make it easy to create self-contained
 reproductions of command sequences.
@@ -42,13 +42,16 @@ succeed and the testscript file will be updated to reflect the actual content.
 As such, this is the cmd/testcript equivalent of
 testscript.Params.UpdateScripts.
 
+The -continue flag specifies that if an error occurs, the script will continue running.
+All errors will be printed and the exit status will be false.
+
 The -work flag prints the temporary work directory path before running each
 script, and does not remove that directory when testscript exits.
 
 Examples
 ========
 
-The following example, fruit.txt, shows a simple reproduction that includes
+The following example, fruit.txtar, shows a simple reproduction that includes
 .gomodproxy supporting files:
 
     go get -m fruit.com
@@ -69,7 +72,7 @@ The following example, fruit.txt, shows a simple reproduction that includes
 
     const Name = "Apple"
 
-Running testscript -v fruit.txt we get:
+Running testscript -v fruit.txtar we get:
 
     ...
     > go get -m fruit.com
@@ -87,7 +90,7 @@ Running testscript -v fruit.txt we get:
     PASS
 
 
-The following example, goimports.txt, shows a simple reproduction involving
+The following example, goimports.txtar, shows a simple reproduction involving
 goimports:
 
     go install golang.org/x/tools/cmd/goimports
@@ -106,7 +109,7 @@ goimports:
 
     const Pi = math.Pi
 
-Running testscript -v goimports.txt we get:
+Running testscript -v goimports.txtar we get:
 
     ...
     > go install golang.org/x/tools/cmd/goimports

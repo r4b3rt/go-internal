@@ -3,12 +3,13 @@
 // license that can be found in the LICENSE file.
 
 // Package renameio writes files atomically by renaming temporary files.
+//
+// Deprecated: Use [github.com/google/renameio/v2] instead.
 package renameio
 
 import (
 	"bytes"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -33,7 +34,7 @@ func WriteFile(filename string, data []byte) (err error) {
 // WriteToFile is a variant of WriteFile that accepts the data as an io.Reader
 // instead of a slice.
 func WriteToFile(filename string, data io.Reader) (err error) {
-	f, err := ioutil.TempFile(filepath.Dir(filename), filepath.Base(filename)+patternSuffix)
+	f, err := os.CreateTemp(filepath.Dir(filename), filepath.Base(filename)+patternSuffix)
 	if err != nil {
 		return err
 	}

@@ -7,8 +7,6 @@ package txtar
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
-	"os"
 	"reflect"
 	"testing"
 )
@@ -44,7 +42,7 @@ hello world`,
 	},
 	// Test CRLF input
 	{
-		name: "basic",
+		name: "basicCRLF",
 		text: "blah\r\n-- hello --\r\nhello\r\n",
 		parsed: &Archive{
 			Comment: []byte("blah\r\n"),
@@ -81,11 +79,7 @@ func shortArchive(a *Archive) string {
 }
 
 func TestWrite(t *testing.T) {
-	td, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(td)
+	td := t.TempDir()
 
 	good := &Archive{Files: []File{File{Name: "good.txt"}}}
 	if err := Write(good, td); err != nil {

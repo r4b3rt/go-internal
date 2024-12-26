@@ -15,22 +15,20 @@
 // very large files into testdata/mod.
 //
 // It is acceptable to edit the archive afterward to remove or shorten files.
-//
 package main
 
 import (
 	"bytes"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/rogpeppe/go-internal/module"
-	"github.com/rogpeppe/go-internal/txtar"
+	"golang.org/x/mod/module"
+	"golang.org/x/tools/txtar"
 )
 
 func usage() {
@@ -64,13 +62,9 @@ func fatalf(format string, args ...interface{}) {
 
 const goCmd = "go"
 
-func main() {
-	os.Exit(main1())
-}
-
 var allFiles = flag.Bool("all", false, "include all source files")
 
-func main1() int {
+func main() {
 	flag.Usage = usage
 	flag.Parse()
 	if flag.NArg() < 2 {
@@ -83,7 +77,7 @@ func main1() int {
 	log.SetFlags(0)
 
 	var err error
-	tmpdir, err = ioutil.TempDir("", "txtar-addmod-")
+	tmpdir, err = os.MkdirTemp("", "txtar-addmod-")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -107,7 +101,7 @@ func main1() int {
 
 	exitCode := 0
 	for _, arg := range modules {
-		if err := ioutil.WriteFile(filepath.Join(tmpdir, "go.mod"), []byte("module m\n"), 0666); err != nil {
+		if err := os.WriteFile(filepath.Join(tmpdir, "go.mod"), []byte("module m\n"), 0o666); err != nil {
 			fatalf("%v", err)
 		}
 		run(goCmd, "get", "-d", arg)
@@ -124,20 +118,20 @@ func main1() int {
 		}
 		path, vers, dir := f[0], f[1], f[2]
 
-		encpath, err := module.EncodePath(path)
+		encpath, err := module.EscapePath(path)
 		if err != nil {
 			log.Printf("failed to encode path %q: %v", path, err)
 			continue
 		}
 		path = encpath
 
-		mod, err := ioutil.ReadFile(filepath.Join(gopath, "pkg/mod/cache/download", path, "@v", vers+".mod"))
+		mod, err := os.ReadFile(filepath.Join(gopath, "pkg/mod/cache/download", path, "@v", vers+".mod"))
 		if err != nil {
 			log.Printf("%s: %v", arg, err)
 			exitCode = 1
 			continue
 		}
-		info, err := ioutil.ReadFile(filepath.Join(gopath, "pkg/mod/cache/download", path, "@v", vers+".info"))
+		info, err := os.ReadFile(filepath.Join(gopath, "pkg/mod/cache/download", path, "@v", vers+".info"))
 		if err != nil {
 			log.Printf("%s: %v", arg, err)
 			exitCode = 1
@@ -150,7 +144,7 @@ func main1() int {
 			title += "@" + vers
 		}
 		dir = filepath.Clean(dir)
-		modDir := strings.Replace(path, "/", "_", -1) + "_" + vers
+		modDir := strings.ReplaceAll(path, "/", "_") + "_" + vers
 		filePrefix := ""
 		if targetDir == "-" {
 			filePrefix = ".gomodproxy/" + modDir + "/"
@@ -163,6 +157,9 @@ func main1() int {
 			{Name: filePrefix + ".info", Data: info},
 		}
 		err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
 			if !info.Mode().IsRegular() {
 				return nil
 			}
@@ -178,7 +175,7 @@ func main1() int {
 				// not including all files via -all
 				return nil
 			}
-			data, err := ioutil.ReadFile(path)
+			data, err := os.ReadFile(path)
 			if err != nil {
 				return err
 			}
@@ -202,7 +199,7 @@ func main1() int {
 				break
 			}
 		} else {
-			if err := ioutil.WriteFile(filepath.Join(targetDir, modDir+".txt"), data, 0666); err != nil {
+			if err := os.WriteFile(filepath.Join(targetDir, modDir+".txtar"), data, 0o666); err != nil {
 				log.Printf("%s: %v", arg, err)
 				exitCode = 1
 				continue
@@ -210,5 +207,5 @@ func main1() int {
 		}
 	}
 	os.RemoveAll(tmpdir)
-	return exitCode
+	os.Exit(exitCode)
 }

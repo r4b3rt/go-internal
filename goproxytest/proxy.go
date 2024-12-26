@@ -7,9 +7,9 @@ Package goproxytest serves Go modules from a proxy server designed to run on
 localhost during tests, both to make tests avoid requiring specific network
 servers and also to make them significantly faster.
 
-Each module archive is either a file named path_vers.txt or a directory named
-path_vers, where slashes in path have been replaced with underscores. The
-archive or directory must contain two files ".info" and ".mod", to be served as
+Each module archive is either a file named path_vers.txtar or path_vers.txt, or
+a directory named path_vers, where slashes in path have been replaced with underscores.
+The archive or directory must contain two files ".info" and ".mod", to be served as
 the info and mod files in the proxy protocol (see
 https://research.swtch.com/vgo-module).  The remaining files are served as the
 content of the module zip file.  The path@vers prefix required of files in the
@@ -24,46 +24,62 @@ package goproxytest
 import (
 	"archive/zip"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 
-	"github.com/rogpeppe/go-internal/module"
+	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
+	"golang.org/x/tools/txtar"
+
 	"github.com/rogpeppe/go-internal/par"
-	"github.com/rogpeppe/go-internal/semver"
-	"github.com/rogpeppe/go-internal/txtar"
 )
 
 type Server struct {
 	server       *http.Server
 	URL          string
 	dir          string
+	logf         func(string, ...any)
 	modList      []module.Version
 	zipCache     par.Cache
 	archiveCache par.Cache
 }
 
-// StartProxy starts the Go module proxy listening on the given
+// NewTestServer is a wrapper around [NewServer] for use in Go tests.
+// Failure to start the server stops the test via [testing.TB.Fatalf],
+// all server logs go through [testing.TB.Logf],
+// and the server is closed when the test finishes via [testing.TB.Cleanup].
+func NewTestServer(tb testing.TB, dir, addr string) *Server {
+	srv, err := newServer(dir, addr, tb.Logf)
+	if err != nil {
+		tb.Fatalf("cannot start Go proxy: %v", err)
+	}
+	tb.Cleanup(srv.Close)
+	return srv
+}
+
+// NewServer starts the Go module proxy listening on the given
 // network address. It serves modules taken from the given directory
 // name. If addr is empty, it will listen on an arbitrary
 // localhost port. If dir is empty, "testmod" will be used.
 //
 // The returned Server should be closed after use.
 func NewServer(dir, addr string) (*Server, error) {
-	var srv Server
-	if addr == "" {
-		addr = "localhost:0"
-	}
-	if dir == "" {
-		dir = "testmod"
-	}
-	srv.dir = dir
+	return newServer(dir, addr, log.Printf)
+}
+
+func newServer(dir, addr string, logf func(string, ...any)) (*Server, error) {
+	addr = cmp.Or(addr, "localhost:0")
+	dir = cmp.Or(dir, "testmod")
+	srv := Server{dir: dir, logf: logf}
 	if err := srv.readModList(); err != nil {
 		return nil, fmt.Errorf("cannot read modules: %v", err)
 	}
@@ -78,7 +94,7 @@ func NewServer(dir, addr string) (*Server, error) {
 	srv.URL = "http://" + addr + "/mod"
 	go func() {
 		if err := srv.server.Serve(l); err != nil && err != http.ErrServerClosed {
-			log.Printf("go proxy: http.Serve: %v", err)
+			srv.logf("go proxy: http.Serve: %v", err)
 		}
 	}()
 	return &srv, nil
@@ -90,27 +106,32 @@ func (srv *Server) Close() {
 }
 
 func (srv *Server) readModList() error {
-	infos, err := ioutil.ReadDir(srv.dir)
+	entries, err := os.ReadDir(srv.dir)
 	if err != nil {
 		return err
 	}
-	for _, info := range infos {
-		name := info.Name()
-		if !strings.HasSuffix(name, ".txt") && !info.IsDir() {
+	for _, entry := range entries {
+		name := entry.Name()
+		switch {
+		case strings.HasSuffix(name, ".txt"):
+			name = strings.TrimSuffix(name, ".txt")
+		case strings.HasSuffix(name, ".txtar"):
+			name = strings.TrimSuffix(name, ".txtar")
+		case entry.IsDir():
+		default:
 			continue
 		}
-		name = strings.TrimSuffix(name, ".txt")
 		i := strings.LastIndex(name, "_v")
 		if i < 0 {
 			continue
 		}
-		encPath := strings.Replace(name[:i], "_", "/", -1)
-		path, err := module.DecodePath(encPath)
+		encPath := strings.ReplaceAll(name[:i], "_", "/")
+		path, err := module.UnescapePath(encPath)
 		if err != nil {
 			return fmt.Errorf("cannot decode module path in %q: %v", name, err)
 		}
 		encVers := name[i+1:]
-		vers, err := module.DecodeVersion(encVers)
+		vers, err := module.UnescapeVersion(encVers)
 		if err != nil {
 			return fmt.Errorf("cannot decode module version in %q: %v", name, err)
 		}
@@ -133,9 +154,9 @@ func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	enc, file := path[:i], path[i+len("/@v/"):]
-	path, err := module.DecodePath(enc)
+	path, err := module.UnescapePath(enc)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "go proxy_test: %v\n", err)
+		srv.logf("go proxy_test: %v\n", err)
 		http.NotFound(w, r)
 		return
 	}
@@ -161,9 +182,9 @@ func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	encVers, ext := file[:i], file[i+1:]
-	vers, err := module.DecodeVersion(encVers)
+	vers, err := module.UnescapeVersion(encVers)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "go proxy_test: %v\n", err)
+		srv.logf("go proxy_test: %v\n", err)
 		http.NotFound(w, r)
 		return
 	}
@@ -198,7 +219,7 @@ func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
 		// to resolve github.com, github.com/hello and github.com/hello/world.
 		// cmd/go expects a 404/410 response if there is nothing there. Hence we
 		// cannot return with a 500.
-		fmt.Fprintf(os.Stderr, "go proxy: no archive %s %s\n", path, vers)
+		srv.logf("go proxy: no archive %s %s\n", path, vers)
 		http.NotFound(w, r)
 		return
 	}
@@ -240,7 +261,7 @@ func (srv *Server) handler(w http.ResponseWriter, r *http.Request) {
 		}).(cached)
 
 		if c.err != nil {
-			fmt.Fprintf(os.Stderr, "go proxy: %v\n", c.err)
+			srv.logf("go proxy: %v\n", c.err)
 			http.Error(w, c.err.Error(), 500)
 			return
 		}
@@ -269,39 +290,43 @@ func (srv *Server) findHash(m module.Version) string {
 }
 
 func (srv *Server) readArchive(path, vers string) *txtar.Archive {
-	enc, err := module.EncodePath(path)
+	enc, err := module.EscapePath(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "go proxy: %v\n", err)
+		srv.logf("go proxy: %v\n", err)
 		return nil
 	}
-	encVers, err := module.EncodeVersion(vers)
+	encVers, err := module.EscapeVersion(vers)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "go proxy: %v\n", err)
+		srv.logf("go proxy: %v\n", err)
 		return nil
 	}
 
-	prefix := strings.Replace(enc, "/", "_", -1)
-	name := filepath.Join(srv.dir, prefix+"_"+encVers+".txt")
+	prefix := strings.ReplaceAll(enc, "/", "_")
+	name := filepath.Join(srv.dir, prefix+"_"+encVers)
+	txtName := name + ".txt"
+	txtarName := name + ".txtar"
 	a := srv.archiveCache.Do(name, func() interface{} {
-		a, err := txtar.ParseFile(name)
+		a, err := txtar.ParseFile(txtarName)
 		if os.IsNotExist(err) {
-			// we fallback to trying a directory
-			name = strings.TrimSuffix(name, ".txt")
-
+			// fall back to trying with the .txt extension
+			a, err = txtar.ParseFile(txtName)
+		}
+		if os.IsNotExist(err) {
+			// fall back to trying a directory
 			a = new(txtar.Archive)
 
-			err = filepath.Walk(name, func(path string, info os.FileInfo, err error) error {
+			err = filepath.WalkDir(name, func(path string, entry fs.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
-				if path == name && !info.IsDir() {
+				if path == name && !entry.IsDir() {
 					return fmt.Errorf("expected a directory root")
 				}
-				if info.IsDir() {
+				if entry.IsDir() {
 					return nil
 				}
 				arpath := filepath.ToSlash(strings.TrimPrefix(path, name+string(os.PathSeparator)))
-				data, err := ioutil.ReadFile(path)
+				data, err := os.ReadFile(path)
 				if err != nil {
 					return err
 				}
@@ -314,7 +339,7 @@ func (srv *Server) readArchive(path, vers string) *txtar.Archive {
 		}
 		if err != nil {
 			if !os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "go proxy: %v\n", err)
+				srv.logf("go proxy: %v\n", err)
 			}
 			a = nil
 		}

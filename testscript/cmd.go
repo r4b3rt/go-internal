@@ -8,15 +8,16 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
-	"github.com/pkg/diff"
+	"github.com/rogpeppe/go-internal/diff"
+	"github.com/rogpeppe/go-internal/testscript/internal/pty"
 	"github.com/rogpeppe/go-internal/txtar"
 )
 
@@ -24,7 +25,6 @@ import (
 // Keep list and the implementations below sorted by name.
 //
 // NOTE: If you make changes here, update doc.go.
-//
 var scriptCmds = map[string]func(*TestScript, bool, []string){
 	"cd":       (*TestScript).cmdCd,
 	"chmod":    (*TestScript).cmdChmod,
@@ -35,16 +35,20 @@ var scriptCmds = map[string]func(*TestScript, bool, []string){
 	"exec":     (*TestScript).cmdExec,
 	"exists":   (*TestScript).cmdExists,
 	"grep":     (*TestScript).cmdGrep,
+	"kill":     (*TestScript).cmdKill,
 	"mkdir":    (*TestScript).cmdMkdir,
+	"mv":       (*TestScript).cmdMv,
 	"rm":       (*TestScript).cmdRm,
-	"unquote":  (*TestScript).cmdUnquote,
 	"skip":     (*TestScript).cmdSkip,
-	"stdin":    (*TestScript).cmdStdin,
 	"stderr":   (*TestScript).cmdStderr,
+	"stdin":    (*TestScript).cmdStdin,
 	"stdout":   (*TestScript).cmdStdout,
+	"ttyin":    (*TestScript).cmdTtyin,
+	"ttyout":   (*TestScript).cmdTtyout,
 	"stop":     (*TestScript).cmdStop,
 	"symlink":  (*TestScript).cmdSymlink,
 	"unix2dos": (*TestScript).cmdUNIX2DOS,
+	"unquote":  (*TestScript).cmdUnquote,
 	"wait":     (*TestScript).cmdWait,
 }
 
@@ -58,18 +62,11 @@ func (ts *TestScript) cmdCd(neg bool, args []string) {
 	}
 
 	dir := args[0]
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(ts.cd, dir)
-	}
-	info, err := os.Stat(dir)
+	err := ts.Chdir(dir)
 	if os.IsNotExist(err) {
 		ts.Fatalf("directory %s does not exist", dir)
 	}
 	ts.Check(err)
-	if !info.IsDir() {
-		ts.Fatalf("%s is not a directory", dir)
-	}
-	ts.cd = dir
 	ts.Logf("%s\n", ts.cd)
 }
 
@@ -96,41 +93,41 @@ func (ts *TestScript) cmdChmod(neg bool, args []string) {
 
 // cmp compares two files.
 func (ts *TestScript) cmdCmp(neg bool, args []string) {
-	if neg {
-		// It would be strange to say "this file can have any content except this precise byte sequence".
-		ts.Fatalf("unsupported: ! cmp")
-	}
 	if len(args) != 2 {
 		ts.Fatalf("usage: cmp file1 file2")
 	}
 
-	ts.doCmdCmp(args, false)
+	ts.doCmdCmp(neg, args, false)
 }
 
 // cmpenv compares two files with environment variable substitution.
 func (ts *TestScript) cmdCmpenv(neg bool, args []string) {
-	if neg {
-		ts.Fatalf("unsupported: ! cmpenv")
-	}
 	if len(args) != 2 {
 		ts.Fatalf("usage: cmpenv file1 file2")
 	}
-	ts.doCmdCmp(args, true)
+	ts.doCmdCmp(neg, args, true)
 }
 
-func (ts *TestScript) doCmdCmp(args []string, env bool) {
+func (ts *TestScript) doCmdCmp(neg bool, args []string, env bool) {
 	name1, name2 := args[0], args[1]
 	text1 := ts.ReadFile(name1)
 
 	absName2 := ts.MkAbs(name2)
-	data, err := ioutil.ReadFile(absName2)
+	data, err := os.ReadFile(absName2)
 	ts.Check(err)
 	text2 := string(data)
 	if env {
 		text2 = ts.expand(text2)
 	}
-	if text1 == text2 {
-		return
+	eq := text1 == text2
+	if neg {
+		if eq {
+			ts.Fatalf("%s and %s do not differ", name1, name2)
+		}
+		return // they differ, as expected
+	}
+	if eq {
+		return // they are equal, as expected
 	}
 	if ts.params.UpdateScripts && !env {
 		if scriptFile, ok := ts.scriptFiles[absName2]; ok {
@@ -141,22 +138,9 @@ func (ts *TestScript) doCmdCmp(args []string, env bool) {
 		// update the script.
 	}
 
-	// pkg/diff is quadratic at the moment.
-	// If the product of the number of lines in the inputs is too large,
-	// don't call pkg.Diff at all as it might take tons of memory or time.
-	// We found one million to be reasonable for an average laptop.
-	const maxLineDiff = 1_000_000
-	if strings.Count(text1, "\n")*strings.Count(text2, "\n") > maxLineDiff {
-		ts.Fatalf("large files %s and %s differ", name1, name2)
-		return
-	}
+	unifiedDiff := diff.Diff(name1, []byte(text1), name2, []byte(text2))
 
-	var sb strings.Builder
-	if err := diff.Text(name1, name2, text1, text2, &sb); err != nil {
-		ts.Check(err)
-	}
-
-	ts.Logf("%s", sb.String())
+	ts.Logf("%s", unifiedDiff)
 	ts.Fatalf("%s and %s differ", name1, name2)
 }
 
@@ -186,24 +170,28 @@ func (ts *TestScript) cmdCp(neg bool, args []string) {
 		case "stdout":
 			src = arg
 			data = []byte(ts.stdout)
-			mode = 0666
+			mode = 0o666
 		case "stderr":
 			src = arg
 			data = []byte(ts.stderr)
-			mode = 0666
+			mode = 0o666
+		case "ttyout":
+			src = arg
+			data = []byte(ts.ttyout)
+			mode = 0o666
 		default:
 			src = ts.MkAbs(arg)
 			info, err := os.Stat(src)
 			ts.Check(err)
-			mode = info.Mode() & 0777
-			data, err = ioutil.ReadFile(src)
+			mode = info.Mode() & 0o777
+			data, err = os.ReadFile(src)
 			ts.Check(err)
 		}
 		targ := dst
 		if dstDir {
 			targ = filepath.Join(dst, filepath.Base(src))
 		}
-		ts.Check(ioutil.WriteFile(targ, data, mode))
+		ts.Check(os.WriteFile(targ, data, mode))
 	}
 }
 
@@ -253,7 +241,7 @@ func (ts *TestScript) cmdExec(neg bool, args []string) {
 		if err == nil {
 			wait := make(chan struct{})
 			go func() {
-				ctxWait(ts.ctxt, cmd)
+				waitOrStop(ts.ctxt, cmd, -1)
 				close(wait)
 			}()
 			ts.background = append(ts.background, backgroundCmd{bgName, cmd, wait, neg})
@@ -306,7 +294,7 @@ func (ts *TestScript) cmdExists(neg bool, args []string) {
 		if err != nil && !neg {
 			ts.Fatalf("%s does not exist", file)
 		}
-		if err == nil && !neg && readonly && info.Mode()&0222 != 0 {
+		if err == nil && !neg && readonly && info.Mode()&0o222 != 0 {
 			ts.Fatalf("%s exists but is writable", file)
 		}
 	}
@@ -321,8 +309,18 @@ func (ts *TestScript) cmdMkdir(neg bool, args []string) {
 		ts.Fatalf("usage: mkdir dir...")
 	}
 	for _, arg := range args {
-		ts.Check(os.MkdirAll(ts.MkAbs(arg), 0777))
+		ts.Check(os.MkdirAll(ts.MkAbs(arg), 0o777))
 	}
+}
+
+func (ts *TestScript) cmdMv(neg bool, args []string) {
+	if neg {
+		ts.Fatalf("unsupported: ! mv")
+	}
+	if len(args) != 2 {
+		ts.Fatalf("usage: mv old new")
+	}
+	ts.Check(os.Rename(ts.MkAbs(args[0]), ts.MkAbs(args[1])))
 }
 
 // unquote unquotes files.
@@ -332,11 +330,11 @@ func (ts *TestScript) cmdUnquote(neg bool, args []string) {
 	}
 	for _, arg := range args {
 		file := ts.MkAbs(arg)
-		data, err := ioutil.ReadFile(file)
+		data, err := os.ReadFile(file)
 		ts.Check(err)
 		data, err = txtar.Unquote(data)
 		ts.Check(err)
-		err = ioutil.WriteFile(file, data, 0666)
+		err = os.WriteFile(file, data, 0o666)
 		ts.Check(err)
 	}
 }
@@ -385,6 +383,9 @@ func (ts *TestScript) cmdStdin(neg bool, args []string) {
 	if len(args) != 1 {
 		ts.Fatalf("usage: stdin filename")
 	}
+	if ts.stdinPty {
+		ts.Fatalf("conflicting use of 'stdin' and 'ttyin -stdin'")
+	}
 	ts.stdin = ts.ReadFile(args[0])
 }
 
@@ -402,6 +403,37 @@ func (ts *TestScript) cmdStderr(neg bool, args []string) {
 // Like stdout/stderr and unlike Unix grep, it accepts Go regexp syntax.
 func (ts *TestScript) cmdGrep(neg bool, args []string) {
 	scriptMatch(ts, neg, args, "", "grep")
+}
+
+func (ts *TestScript) cmdTtyin(neg bool, args []string) {
+	if !pty.Supported {
+		ts.Fatalf("unsupported: ttyin on %s", runtime.GOOS)
+	}
+	if neg {
+		ts.Fatalf("unsupported: ! ttyin")
+	}
+	switch len(args) {
+	case 1:
+		ts.ttyin = ts.ReadFile(args[0])
+	case 2:
+		if args[0] != "-stdin" {
+			ts.Fatalf("usage: ttyin [-stdin] filename")
+		}
+		if ts.stdin != "" {
+			ts.Fatalf("conflicting use of 'stdin' and 'ttyin -stdin'")
+		}
+		ts.stdinPty = true
+		ts.ttyin = ts.ReadFile(args[1])
+	default:
+		ts.Fatalf("usage: ttyin [-stdin] filename")
+	}
+	if ts.ttyin == "" {
+		ts.Fatalf("tty input file is empty")
+	}
+}
+
+func (ts *TestScript) cmdTtyout(neg bool, args []string) {
+	scriptMatch(ts, neg, args, ts.ttyout, "ttyout")
 }
 
 // stop stops execution of the test (marking it passed).
@@ -443,17 +475,79 @@ func (ts *TestScript) cmdUNIX2DOS(neg bool, args []string) {
 	}
 	for _, arg := range args {
 		filename := ts.MkAbs(arg)
-		data, err := ioutil.ReadFile(filename)
+		data, err := os.ReadFile(filename)
 		ts.Check(err)
 		dosData, err := unix2DOS(data)
 		ts.Check(err)
-		if err := ioutil.WriteFile(filename, dosData, 0666); err != nil {
+		if err := os.WriteFile(filename, dosData, 0o666); err != nil {
 			ts.Fatalf("%s: %v", filename, err)
 		}
 	}
 }
 
-// Tait waits for background commands to exit, setting stderr and stdout to their result.
+// cmdKill kills background commands.
+func (ts *TestScript) cmdKill(neg bool, args []string) {
+	signals := map[string]os.Signal{
+		"INT":  os.Interrupt,
+		"KILL": os.Kill,
+	}
+	var (
+		name   string
+		signal os.Signal
+	)
+	switch len(args) {
+	case 0:
+	case 1, 2:
+		sig, ok := strings.CutPrefix(args[0], "-")
+		if ok {
+			signal, ok = signals[sig]
+			if !ok {
+				ts.Fatalf("unknown signal: %s", sig)
+			}
+		} else {
+			name = args[0]
+			break
+		}
+		if len(args) == 2 {
+			name = args[1]
+		}
+	default:
+		ts.Fatalf("usage: kill [-SIGNAL] [name]")
+	}
+	if neg {
+		ts.Fatalf("unsupported: ! kill")
+	}
+	if signal == nil {
+		signal = os.Kill
+	}
+	if name != "" {
+		ts.killBackgroundOne(name, signal)
+	} else {
+		ts.killBackground(signal)
+	}
+}
+
+func (ts *TestScript) killBackgroundOne(bgName string, signal os.Signal) {
+	bg := ts.findBackground(bgName)
+	if bg == nil {
+		ts.Fatalf("unknown background process %q", bgName)
+	}
+	err := bg.cmd.Process.Signal(signal)
+	if err != nil {
+		ts.Fatalf("unexpected error terminating background command %q: %v", bgName, err)
+	}
+}
+
+func (ts *TestScript) killBackground(signal os.Signal) {
+	for bgName, bg := range ts.background {
+		err := bg.cmd.Process.Signal(signal)
+		if err != nil {
+			ts.Fatalf("unexpected error terminating background command %q: %v", bgName, err)
+		}
+	}
+}
+
+// cmdWait waits for background commands to exit, setting stderr and stdout to their result.
 func (ts *TestScript) cmdWait(neg bool, args []string) {
 	if len(args) > 1 {
 		ts.Fatalf("usage: wait [name]")
@@ -593,7 +687,7 @@ func scriptMatch(ts *TestScript, neg bool, args []string, text, name string) {
 	isGrep := name == "grep"
 	if isGrep {
 		name = args[1] // for error messages
-		data, err := ioutil.ReadFile(ts.MkAbs(args[1]))
+		data, err := os.ReadFile(ts.MkAbs(args[1]))
 		ts.Check(err)
 		text = string(data)
 	}
